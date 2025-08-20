@@ -7,12 +7,12 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 type People struct {
@@ -143,144 +143,149 @@ func SearchServer(w http.ResponseWriter, req *http.Request) {
 	w.Write(jsonData)
 }
 
-//func main() {
-//	http.HandleFunc("/search", SearchServer)
-//
-//	log.Println("Server started at http://localhost:8080")
-//	err := http.ListenAndServe(":8080", nil)
-//	if err != nil {
-//		log.Fatal(err)
-//	}
-//}
+func TestSortUsers(t *testing.T) {
+	//users := readXML("dataset.xml")
+	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
+	defer ts.Close()
 
-type SearchTestCase struct {
-	Query    string
-	OrderBy  string
-	OrderFld string
-	Limit    string
-	Offset   string
-	Result   []string // ожидаемые имена пользователей
-	IsError  bool
+	cl := SearchClient{URL: ts.URL}
+
+	resp1, err := cl.FindUsers(SearchRequest{Limit: 100, Offset: 0, Query: "", OrderField: "Name", OrderBy: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp1.Users) == 0 {
+		t.Fatal(err)
+	}
+
+	_, err2 := cl.FindUsers(SearchRequest{Limit: -1, Offset: 0})
+	if err2.Error() != "limit must be > 0" {
+		t.Fatal(err)
+	}
+
+	_, err3 := cl.FindUsers(SearchRequest{Limit: 25, Offset: -1})
+	if err3.Error() != "offset must be > 0" {
+		t.Fatal(err)
+	}
+
+	resp2, err := cl.FindUsers(SearchRequest{Limit: 100, Offset: 0, Query: ";(ВОВ(ВО№(", OrderField: "Name", OrderBy: -1})
+	if resp2 == nil {
+		t.Fatal(err)
+	}
 }
 
-var readXMLFunc = readXML
+func TestStatus401(t *testing.T) {
+	//users := readXML("dataset.xml")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer ts.Close()
 
-func TestSearchServer(t *testing.T) {
-	// создаём временный XML
-	tmpFile, err := os.CreateTemp("", "dataset_*.xml")
-	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
+	cl := SearchClient{URL: ts.URL}
+
+	_, err := cl.FindUsers(SearchRequest{Limit: 100, Offset: 0, Query: "", OrderField: "Name", OrderBy: -1})
+	if err.Error() != "Bad AccessToken" {
+		t.Fatal(err)
 	}
-	defer os.Remove(tmpFile.Name())
+}
 
-	xmlData := `
-<Users>
-    <row>
-        <id>1</id>
-        <first_name>Alice</first_name>
-        <last_name>Smith</last_name>
-        <age>25</age>
-        <about>hello</about>
-    </row>
-    <row>
-        <id>2</id>
-        <first_name>Bob</first_name>
-        <last_name>Brown</last_name>
-        <age>30</age>
-        <about>developer</about>
-    </row>
-    <row>
-        <id>3</id>
-        <first_name>Charlie</first_name>
-        <last_name>Johnson</last_name>
-        <age>20</age>
-        <about>developer</about>
-    </row>
-</Users>
-`
-	tmpFile.WriteString(xmlData)
-	tmpFile.Close()
+func TestStatus500(t *testing.T) {
+	//users := readXML("dataset.xml")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer ts.Close()
 
-	// подменяем readXMLFunc
-	oldReadXMLFunc := readXMLFunc
-	readXMLFunc = func(_ string) []People {
-		return readXML(tmpFile.Name())
+	cl := SearchClient{URL: ts.URL}
+
+	_, err := cl.FindUsers(SearchRequest{Limit: 100, Offset: 0, Query: "", OrderField: "Name", OrderBy: -1})
+	if err.Error() != "SearchServer fatal error" {
+		t.Fatal(err)
 	}
-	defer func() { readXMLFunc = oldReadXMLFunc }()
+}
 
-	// тестовые кейсы
-	cases := []SearchTestCase{
-		{
-			Query:   "developer",
-			Limit:   "10",
-			Offset:  "0",
-			Result:  []string{"Bob", "Charlie"},
-			IsError: false,
-		},
-		{
-			Query:   "Alice",
-			Limit:   "10",
-			Offset:  "0",
-			Result:  []string{"Alice"},
-			IsError: false,
-		},
-		{
-			Query:   "Alice",
-			Limit:   "1",
-			Offset:  "0",
-			Result:  []string{"Alice"},
-			IsError: false,
-		},
-		{
-			Query:   "Alice",
-			Limit:   "1",
-			Offset:  "10", // offset больше количества
-			Result:  []string{},
-			IsError: false,
-		},
+func TestStatus400_1(t *testing.T) {
+	//users := readXML("dataset.xml")
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"ErrorBadOrderField"}`)
+	}))
+	defer ts.Close()
+
+	cl := SearchClient{URL: ts.URL}
+
+	_, err := cl.FindUsers(SearchRequest{Limit: 100, Offset: 0, Query: "", OrderField: "Name", OrderBy: -1})
+	if !strings.Contains(err.Error(), "OrderFeld") {
+		t.Fatal(err)
 	}
+}
 
-	for i, tc := range cases {
-		q := url.Values{}
-		q.Set("query", tc.Query)
-		q.Set("limit", tc.Limit)
-		q.Set("offset", tc.Offset)
-		q.Set("order_by", tc.OrderBy)
-		q.Set("order_field", tc.OrderFld)
+func TestStatus400_2(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error": *#(SBAD}`)
+	}))
+	defer ts.Close()
 
-		req := httptest.NewRequest(http.MethodGet, "/search?"+q.Encode(), nil)
-		w := httptest.NewRecorder()
+	cl := SearchClient{URL: ts.URL}
 
-		SearchServer(w, req)
+	_, err := cl.FindUsers(SearchRequest{Limit: 100, Offset: 0, Query: "", OrderField: "Name", OrderBy: -1})
+	if !strings.Contains(err.Error(), "json") {
+		t.Fatal(err)
+	}
+}
 
-		resp := w.Result()
-		defer resp.Body.Close()
+func TestStatus400_3(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"OtherError"}`)
+	}))
+	defer ts.Close()
 
-		if resp.StatusCode != http.StatusOK && !tc.IsError {
-			t.Errorf("[%d] unexpected status: %d", i, resp.StatusCode)
-			continue
-		}
-		if resp.StatusCode == http.StatusOK && tc.IsError {
-			t.Errorf("[%d] expected error, got status 200", i)
-			continue
-		}
+	cl := SearchClient{URL: ts.URL}
 
-		body, _ := ioutil.ReadAll(resp.Body)
-		var got []People
-		if err := json.Unmarshal(body, &got); err != nil && !tc.IsError {
-			t.Errorf("[%d] failed to parse json: %v", i, err)
-			continue
-		}
+	_, err := cl.FindUsers(SearchRequest{Limit: 100, Offset: 0, Query: "", OrderField: "Name", OrderBy: -1})
+	if !strings.Contains(err.Error(), "unknown") {
+		t.Fatal(err)
+	}
+}
 
-		if len(got) != len(tc.Result) {
-			t.Errorf("[%d] expected %d results, got %d", i, len(tc.Result), len(got))
-			continue
-		}
+func TestJson(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"name": *(SNdJS*#}`)
+	}))
+	defer ts.Close()
 
-		for j := range got {
-			if got[j].Firstname != tc.Result[j] {
-				t.Errorf("[%d] expected %s, got %s", i, tc.Result[j], got[j].Firstname)
-			}
-		}
+	cl := SearchClient{URL: ts.URL}
+
+	_, err := cl.FindUsers(SearchRequest{Limit: 100, Offset: 0, Query: "", OrderField: "Name", OrderBy: -1})
+	if !strings.Contains(err.Error(), "cant unpack result json") {
+		t.Fatal(err)
+	}
+}
+
+func TestGet(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(SearchServer))
+	ts.Close()
+
+	cl := SearchClient{URL: ts.URL}
+
+	_, err := cl.FindUsers(SearchRequest{Limit: 100, Offset: 0, Query: "", OrderField: "Name", OrderBy: -1})
+	if !strings.Contains(err.Error(), "unknown error") {
+		t.Fatal(err)
+	}
+}
+
+func TestTimeout(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+	}))
+	defer ts.Close()
+
+	cl := SearchClient{URL: ts.URL}
+
+	_, err := cl.FindUsers(SearchRequest{Limit: 100, Offset: 0, Query: "", OrderField: "Name", OrderBy: -1})
+	if !strings.Contains(err.Error(), "timeout") {
+		t.Fatal(err)
 	}
 }
